@@ -1,0 +1,487 @@
+########################################################################################################
+# Automation Scope:-
+#####################
+# 1. Validate RG and Keyvault.
+# 2. Choice in the pipeline to Temporary or Permanently delete feed on Org level.
+# 3. If feed is deleted temporarily from Org Level, it exists in Recycle Bin marked for Permanent deletion. Feed ID still exists in Key Vault.
+# 4. If feed is deleted Permanently from Org Level, it is deleted from Recycle Bin as well. Also, Feed ID is no more in Key Vault.
+# 5. If feed is deleted temporarily from Project Level, it exists in Recycle Bin marked for Permanent deletion. Feed ID still exists in Key Vault.
+# 6. If feed is deleted Permanently from Project Level, it is deleted from Recycle Bin as well. Also, Feed ID is no more in Key Vault.
+
+# Delete from Org: DELETE https://feeds.dev.azure.com/{organization}/_apis/packaging/feeds/{feedId}?api-version=7.1-preview.1
+# Delete from Org Recycle Bin : DELETE https://feeds.dev.azure.com/{organization}/_apis/packaging/feeds/{feedId}?api-version=7.1-preview.1
+
+# Delete from Project: DELETE https://feeds.dev.azure.com/{organization}/{project}/_apis/packaging/feedrecyclebin/{feedId}?api-version=7.1-preview.1
+# Delete from Project Recycle Bin : DELETE https://feeds.dev.azure.com/{organization}/{project}/_apis/packaging/feeds/{feedId}?api-version=7.1-preview.1
+
+#######################################################################################################
+
+trigger:
+  none
+
+######################
+# Declare Parameters:-
+######################
+parameters: 
+- name: SubscriptionID
+  displayName: Subscription ID details follows below:-
+  type: string
+  default: 210e66cb-55cf-424e-8daa-6cad804ab604
+  values:
+  - 210e66cb-55cf-424e-8daa-6cad804ab604
+
+- name: RGName
+  displayName: Please Provide the Resource Group Name:-
+  type: object
+  default: Demo-Blog-RG
+
+- name: KVName
+  displayName: Please Provide the Keyvault Name:-
+  type: object
+  default: ampockv
+
+- name: DevOpsOrganisation
+  type: string
+  default: https://dev.azure.com/ArindamMitra0251
+  values:
+  - https://dev.azure.com/ArindamMitra0251
+
+- name: DevOpsFeed
+  type: string
+  default: https://feeds.dev.azure.com/ArindamMitra0251
+  values:
+  - https://feeds.dev.azure.com/ArindamMitra0251
+
+- name: DevOpsProjName
+  displayName: Please Provide the Devops Project Name:-
+  type: string
+  default: AMCLOUD
+  values:
+  - AMCLOUD
+  
+- name: FeedName
+  displayName: Please Provide the Feed Name:-
+  type: object
+  default: AM-Feed-04
+
+- name: Scope
+  type: string
+  default: Organisation
+  values:
+  - Organisation
+  - Project
+
+- name: Delete
+  type: string
+  default: Temporary
+  values:
+  - Temporary
+  - Permanent
+
+#######################
+# Declare Variables:-
+#######################
+variables:
+  ServiceConnection: 'amcloud-cicd-service-connection'
+  BuildAgent: 'windows-latest'
+  envName: NonProd
+  
+######################
+# Declare Build Agent:-
+######################
+pool:
+  vmImage: '$(BuildAgent)'
+
+###################
+# Declare Stages:-
+###################
+stages:
+
+- stage: Validate_RG_and_KV
+  jobs:
+  - job: Validate_RG_and_KV
+    displayName: Validate RG and KV
+    steps:
+    - task: AzureCLI@2
+      displayName: Validate RG and KV
+      inputs:
+        azureSubscription: $(ServiceConnection)
+        scriptType: ps
+        scriptLocation: inlineScript
+        inlineScript: |
+          az --version
+          az account set --subscription ${{ parameters.SubscriptionID }}
+          az account show
+          $i = az group exists -n ${{ parameters.RGName }}
+            if ($i -eq "true") {
+                echo "##################################################################"
+                echo "Resource Group ${{ parameters.RGName }} EXISTS!!!"
+                echo "##################################################################"
+                $j = az keyvault list --resource-group ${{ parameters.RGName }} --query [].name -o tsv		
+                  if ($j -eq "${{ parameters.KVName }}") {
+                      echo "##################################################################"
+                      echo "Key Vault ${{ parameters.KVName }} EXISTS in Resource Group ${{ parameters.RGName }}!!!"
+                      echo "##################################################################"
+                      }
+                      else {
+                        echo "##################################################################"
+                        echo "Key Vault ${{ parameters.KVName }} DOES NOT EXISTS in Resource Group ${{ parameters.RGName }}!!!"
+                        echo "##################################################################"
+                        exit 1
+                      }
+                }
+                else {
+                  echo "##################################################################"
+                  echo "Resource Group ${{ parameters.RGName }} DOES NOT EXISTS!!!"
+                  echo "##################################################################"
+                  exit 1
+                }
+
+##########################################################
+# Stage: Delete Feed from Organisation Level Temporarily:-
+##########################################################
+- stage: Delete_Feed_Org_Level_Temporary
+  condition: |
+       and(succeeded(), eq('${{ parameters.Scope }}', 'Organisation'), eq('${{ parameters.Delete }}', 'Temporary') ) 
+  jobs:
+  - deployment: 
+    displayName: Delete Feed from Org Level Temporarily
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+###########################################################
+# Delete Feed from Azure Devops Org Level Temporarily:-
+###########################################################
+          - task: PowerShell@2
+            displayName: Delete Feed from Az Devops Org Temporarily
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                echo "ID of the Feed Name "${{ parameters.FeedName }}" is: $(${{ parameters.FeedName }})"
+                
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/_apis/packaging/feeds/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "#######################################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Temporarily. It can be found under Deleted Feeds."
+                echo "#######################################################################################################"
+
+###########################################################
+# Stage: Delete Feed from Organisation Level Permanently:-
+###########################################################
+- stage: Delete_Feed_Org_Level_Permanent
+  dependsOn: Validate_RG_and_KV
+  condition: |
+       and(eq('${{ parameters.Scope }}', 'Organisation'), eq('${{ parameters.Delete }}', 'Permanent') ) 
+  jobs:
+  - deployment: 
+    displayName: Delete Feed from Org Level Permanently
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+##########################################################
+# Delete Feed from Azure Devops Org Level Permanently:-
+##########################################################
+          - task: PowerShell@2
+            displayName: Delete Feed from Az Devops Org Permanently
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                echo "ID of the Feed Name "${{ parameters.FeedName }}" is: $(${{ parameters.FeedName }})"
+                
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/_apis/packaging/feeds/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "#######################################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Temporarily. It can be found under Deleted Feeds."
+                echo "#######################################################################################################"
+
+                echo "Wait time for 60 Secs so that the deleted feed ${{ parameters.FeedName }} reflects in the Recycle Bin marked for Permanent deletion."
+                Start-Sleep 60
+
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/_apis/packaging/feedrecyclebin/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "####################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Permanently from Recycle Bin."
+                echo "####################################################################################"
+
+###############################################################
+# Delete Feed ID from Key Vault:-
+###############################################################
+          - task: AzureCLI@2
+            displayName: Delete Feed ID from KV
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account set --subscription ${{ parameters.SubscriptionID }}
+                az account show 
+
+                az keyvault secret delete --name "${{ parameters.FeedName }}" --vault-name ${{ parameters.KVName }}
+                echo "#################################################################################################################################################################"
+                echo "Secret ${{ parameters.FeedName }} successfully deleted from Key Vault ${{ parameters.KVName }} under the Resource Group ${{ parameters.RGName }}!!!"
+                echo "#################################################################################################################################################################"
+
+###########################################################
+# Stage: Delete Feed from Project Level Temporarily:-
+###########################################################
+- stage: Delete_Feed_Project_Level_Temporary
+  dependsOn: Validate_RG_and_KV
+  condition: |
+       and(eq('${{ parameters.Scope }}', 'Project'), eq('${{ parameters.Delete }}', 'Temporary') ) 
+  jobs:
+  - deployment: 
+    displayName: Delete Feed from Project Level Temporarily
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+##############################################################
+# Delete Feed from Azure Devops Project Level Temporarily:-
+##############################################################
+          - task: PowerShell@2
+            displayName: Delete Feed in Az Devops Project Temporarily
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                echo "ID of the Feed Name "${{ parameters.FeedName }}" is: $(${{ parameters.FeedName }})"
+                
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/${{ parameters.DevOpsProjName }}/_apis/packaging/feeds/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "#######################################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Temporarily. It can be found under Deleted Feeds."
+                echo "#######################################################################################################"
+
+###########################################################
+# Stage: Delete Feed from Project Level Permanently:-
+###########################################################
+- stage: Delete_Feed_Project_Level_Permanent
+  dependsOn: Validate_RG_and_KV
+  condition: |
+       and(eq('${{ parameters.Scope }}', 'Project'), eq('${{ parameters.Delete }}', 'Permanent') ) 
+  jobs:
+  - deployment: 
+    displayName: Delete Feed from Project Level Permanently
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+##########################################################
+# Delete Feed from Azure Devops Project Level Permanently:-
+##########################################################
+          - task: PowerShell@2
+            displayName: Delete Feed from Az Devops Project Permanently
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                echo "ID of the Feed Name "${{ parameters.FeedName }}" is: $(${{ parameters.FeedName }})"
+                
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/${{ parameters.DevOpsProjName }}/_apis/packaging/feeds/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "#######################################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Temporarily. It can be found under Deleted Feeds."
+                echo "#######################################################################################################"
+
+                echo "Wait time for 60 Secs so that the deleted feed ${{ parameters.FeedName }} reflects in the Recycle Bin marked for Permanent deletion."
+                Start-Sleep 60
+
+                Invoke-RestMethod -Method DELETE -Uri ${{ parameters.DevOpsFeed }}/${{ parameters.DevOpsProjName }}/_apis/packaging/feedrecyclebin/$(${{ parameters.FeedName }})?api-version=7.1-preview.1 -Headers $header
+
+                echo "####################################################################################"
+                echo "Feed ${{ parameters.FeedName }} has been deleted Permanently from Recycle Bin."
+                echo "####################################################################################"
+
+#######################################
+# Delete Feed ID from Key Vault:-
+#######################################
+          - task: AzureCLI@2
+            displayName: Delete Feed ID from KV
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account set --subscription ${{ parameters.SubscriptionID }}
+                az account show 
+
+                az keyvault secret delete --name "${{ parameters.FeedName }}" --vault-name ${{ parameters.KVName }}
+                echo "#################################################################################################################################################################"
+                echo "Secret ${{ parameters.FeedName }} successfully deleted from Key Vault ${{ parameters.KVName }} under the Resource Group ${{ parameters.RGName }}!!!"
+                echo "#################################################################################################################################################################"

@@ -1,0 +1,334 @@
+#########################################################################################
+# Automation Scope:-
+#####################
+# 1. Validate RG and Keyvault.
+# 2. Choice in the pipeline to create feed on Org level or Project Level.
+# 3. Based on either choice, the pipleine stores feed ID in Key Vault.
+
+# Create Feed on Org: POST https://feeds.dev.azure.com/{organization}/_apis/packaging/feeds?api-version=7.1-preview.1
+# Create Feed on Project: POST https://feeds.dev.azure.com/{organization}/{project}/_apis/packaging/feeds?api-version=7.1-preview.1
+
+#########################################################################################
+
+trigger:
+  none
+
+######################
+# Declare Parameters:-
+######################
+parameters: 
+- name: SubscriptionID
+  displayName: Subscription ID details follows below:-
+  type: string
+  default: 210e66cb-55cf-424e-8daa-6cad804ab604
+  values:
+  - 210e66cb-55cf-424e-8daa-6cad804ab604
+
+- name: RGName
+  displayName: Please Provide the Resource Group Name:-
+  type: object
+  default: Demo-Blog-RG
+
+- name: KVName
+  displayName: Please Provide the Keyvault Name:-
+  type: object
+  default: ampockv
+
+- name: DevOpsOrganisation
+  type: string
+  default: https://dev.azure.com/ArindamMitra0251
+  values:
+  - https://dev.azure.com/ArindamMitra0251
+
+- name: DevOpsFeed
+  type: string
+  default: https://feeds.dev.azure.com/ArindamMitra0251
+  values:
+  - https://feeds.dev.azure.com/ArindamMitra0251
+
+- name: DevOpsProjName
+  displayName: Please Provide the Devops Project Name:-
+  type: string
+  default: AMCLOUD
+  values:
+  - AMCLOUD
+  
+- name: FeedName
+  displayName: Please Provide the Feed Name:-
+  type: object
+  default: AM-Feed-02
+
+- name: Scope
+  type: string
+  default: Organisation
+  values:
+  - Organisation
+  - Project
+
+- name: Create
+  type: string
+  default: Create
+  values:
+  - Create
+
+#######################
+# Declare Variables:-
+#######################
+variables:
+  ServiceConnection: 'amcloud-cicd-service-connection'
+  BuildAgent: 'windows-latest'
+  envName: NonProd
+  
+######################
+# Declare Build Agent:-
+######################
+pool:
+  vmImage: '$(BuildAgent)'
+
+###################
+# Declare Stages:-
+###################
+stages:
+
+- stage: Validate_RG_and_KV
+  jobs:
+  - job: Validate_RG_and_KV
+    displayName: Validate RG and KV
+    steps:
+    - task: AzureCLI@2
+      displayName: Validate RG and KV
+      inputs:
+        azureSubscription: $(ServiceConnection)
+        scriptType: ps
+        scriptLocation: inlineScript
+        inlineScript: |
+          az --version
+          az account set --subscription ${{ parameters.SubscriptionID }}
+          az account show
+          $i = az group exists -n ${{ parameters.RGName }}
+            if ($i -eq "true") {
+                echo "##################################################################"
+                echo "Resource Group ${{ parameters.RGName }} EXISTS!!!"
+                echo "##################################################################"
+                $j = az keyvault list --resource-group ${{ parameters.RGName }} --query [].name -o tsv		
+                  if ($j -eq "${{ parameters.KVName }}") {
+                      echo "##################################################################"
+                      echo "Key Vault ${{ parameters.KVName }} EXISTS in Resource Group ${{ parameters.RGName }}!!!"
+                      echo "##################################################################"
+                      }
+                      else {
+                        echo "##################################################################"
+                        echo "Key Vault ${{ parameters.KVName }} DOES NOT EXISTS in Resource Group ${{ parameters.RGName }}!!!"
+                        echo "##################################################################"
+                        exit 1
+                      }
+                }
+                else {
+                  echo "##################################################################"
+                  echo "Resource Group ${{ parameters.RGName }} DOES NOT EXISTS!!!"
+                  echo "##################################################################"
+                  exit 1
+                }
+
+##############################################
+# Stage: Create Feed on Organisation Level:-
+##############################################
+- stage: Create_Feed_Org_Level
+  condition: |
+       and(succeeded(), eq('${{ parameters.Scope }}', 'Organisation'), eq('${{ parameters.Create }}', 'Create') ) 
+  jobs:
+  - deployment: 
+    displayName: Create Feed on Org Level
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+######################################################
+# Create Feed in Azure Devops in Org Level:-
+######################################################
+          - task: PowerShell@2
+            displayName: Create Feed in Az Devops Org
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                $body = '{
+                  "name": "${{ parameters.FeedName }}",
+                  "hideDeletedPackageVersions": true,
+                  "upstreamEnabled": true
+                  }'
+              
+
+                $feedID = Invoke-RestMethod -Method Post -Uri ${{ parameters.DevOpsFeed }}/_apis/packaging/feeds?api-version=7.1-preview.1 -Headers $header -Body $body | Select -ExpandProperty id
+                echo $feedID
+
+                echo "##vso[task.setvariable variable=FID]$feedID"
+
+                echo "#####################################################################################"
+                echo "Feed ${{ parameters.FeedName }} created successfully on Organisation Level."
+                echo "#####################################################################################"
+
+###############################################################
+# Store Created Feed ID in Key Vault:-
+###############################################################
+          - task: AzureCLI@2
+            displayName: Store Feed ID in KV
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account set --subscription ${{ parameters.SubscriptionID }}
+                az account show 
+
+                echo "The Feed ID is: $(FID)"
+                
+                az keyvault secret set --name "${{ parameters.FeedName }}" --vault-name ${{ parameters.KVName }} --value $(FID)
+                echo "#################################################################################################################################################################"
+                echo "Feed ID $(FID) (${{ parameters.FeedName }}) has been successfully Stored in Key Vault ${{ parameters.KVName }} under the Resource Group ${{ parameters.RGName }}!!!"
+                echo "#################################################################################################################################################################"
+
+##############################################
+# Stage: Create Feed on Project Level:-
+##############################################
+- stage: Create_Feed_Project_Level
+  dependsOn: Validate_RG_and_KV
+  condition: |
+       and(eq('${{ parameters.Scope }}', 'Project'), eq('${{ parameters.Create }}', 'Create') ) 
+  jobs:
+  - deployment: 
+    displayName: Create Feed on Project Level
+    environment: '$(envName)'
+    pool:
+      vmImage: $(BuildAgent)
+    strategy:
+      runOnce:
+        deploy:
+          steps:  
+########################################################
+# Install Az DevOps CLI Extension in the Build Agent:-
+#######################################################
+          - task: AzureCLI@1
+            displayName: Install Devops CLI Extension
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name azure-devops
+                az extension show --name azure-devops --output table
+
+###############################################################
+# Help Option of Az DevOps CLI Extension in the Build Agent:-
+###############################################################
+          - task: PowerShell@2
+            displayName: Help Option of Az Devops CLI
+            inputs:
+              targetType: 'inline'
+              script: |
+                az devops -h
+
+################################        
+# Download Keyvault Secrets:-
+################################
+          - task: AzureKeyVault@2
+            displayName: Fetch all Secrets from Keyvault
+            inputs:
+              azureSubscription: '$(ServiceConnection)'
+              KeyVaultName: '${{ parameters.KVName }}'
+              SecretsFilter: '*'
+              RunAsPreJob: false
+
+######################################################
+# Create Feed in Azure Devops Project level:-
+######################################################
+          - task: PowerShell@2
+            displayName: Create Feed in Az Devops Project
+            inputs:
+              targetType: 'inline'
+              script: |
+                $B64Pat = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$(PAT)"))
+
+                $header = @{
+                'Authorization' = 'Basic ' + $B64Pat
+                'Content-Type' = 'application/json'
+                }
+                
+                $body = '{
+                  "name": "${{ parameters.FeedName }}",
+                  "hideDeletedPackageVersions": true,
+                  "upstreamEnabled": true
+                  }'
+              
+
+                $feedID = Invoke-RestMethod -Method Post -Uri ${{ parameters.DevOpsFeed }}/${{ parameters.DevOpsProjName }}/_apis/packaging/feeds?api-version=7.1-preview.1 -Headers $header -Body $body | Select -ExpandProperty id
+                echo $feedID
+
+                echo "##vso[task.setvariable variable=FID]$feedID"
+
+                echo "#####################################################################################"
+                echo "Feed ${{ parameters.FeedName }} created successfully on Project Level."
+                echo "#####################################################################################"
+
+###############################################################
+# Store Created Feed ID in Key Vault:-
+###############################################################
+          - task: AzureCLI@2
+            displayName: Store Feed ID in KV
+            inputs:
+              azureSubscription: $(ServiceConnection)
+              scriptType: ps
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account set --subscription ${{ parameters.SubscriptionID }}
+                az account show 
+
+                echo "The Feed ID is: $(FID)"
+                
+                az keyvault secret set --name "${{ parameters.FeedName }}" --vault-name ${{ parameters.KVName }} --value $(FID)
+                echo "#################################################################################################################################################################"
+                echo "Feed ID $(FID) (${{ parameters.FeedName }}) has been successfully Stored in Key Vault ${{ parameters.KVName }} under the Resource Group ${{ parameters.RGName }}!!!"
+                echo "#################################################################################################################################################################"
